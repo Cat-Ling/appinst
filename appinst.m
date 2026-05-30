@@ -31,6 +31,7 @@ typedef enum {
 // MobileInstallation for iOS 5〜7
 typedef void (*MobileInstallationCallback)(CFDictionaryRef information);
 typedef int (*MobileInstallationInstall)(CFStringRef path, CFDictionaryRef parameters, MobileInstallationCallback callback, CFStringRef backpath);
+typedef int (*MobileInstallationUninstall)(CFStringRef bundleIdentifier, CFDictionaryRef parameters, MobileInstallationCallback callback, void *unknown);
 #define MI_PATH "/System/Library/PrivateFrameworks/MobileInstallation.framework/MobileInstallation"
 
 void mobileInstallationStatusCallback(CFDictionaryRef information) {
@@ -124,20 +125,86 @@ int main(int argc, const char *argv[]) {
 			}
 		}
 
-		// Print usage information if the number of arguments was incorrect
-		if (argc != 2) {
-			printf("Usage: appinst <path to IPA file>\n");
-			return AppInstExitCodeUnknown;
-		}
-		
-		// Check if the user-specified file path exists
-		NSString *filePath = [NSString stringWithUTF8String:argv[1]];
-		if (![fileManager fileExistsAtPath:filePath]) {
-			// If the first argument is -h or --help, print usage information
-			if ([filePath isEqualToString:@"-h"] || [filePath isEqualToString:@"--help"]) {
-				printf("Usage: appinst <path to IPA file>\n");
+		// Parse command line arguments
+		BOOL isUninstall = NO;
+		NSString *uninstallBundleID = nil;
+		NSString *filePath = nil;
+
+		if (argc == 3) {
+			NSString *arg1 = [NSString stringWithUTF8String:argv[1]];
+			if ([arg1 isEqualToString:@"-u"] || [arg1 isEqualToString:@"--uninstall"]) {
+				isUninstall = YES;
+				uninstallBundleID = [NSString stringWithUTF8String:argv[2]];
+			} else {
+				printf("Usage:\n  Install:   appinst <path to IPA file>\n  Uninstall: appinst -u <bundle identifier>\n");
 				return AppInstExitCodeUnknown;
 			}
+		} else if (argc == 2) {
+			filePath = [NSString stringWithUTF8String:argv[1]];
+			if ([filePath isEqualToString:@"-h"] || [filePath isEqualToString:@"--help"]) {
+				printf("Usage:\n  Install:   appinst <path to IPA file>\n  Uninstall: appinst -u <bundle identifier>\n");
+				return AppInstExitCodeUnknown;
+			}
+		} else {
+			printf("Usage:\n  Install:   appinst <path to IPA file>\n  Uninstall: appinst -u <bundle identifier>\n");
+			return AppInstExitCodeUnknown;
+		}
+
+		if (isUninstall) {
+			printf("Uninstalling \"%s\"…\n", [uninstallBundleID UTF8String]);
+			BOOL isUninstalled = NO;
+
+			if (kCFCoreFoundationVersionNumber >= kCFCoreFoundationVersionNumber_iOS_8_0) {
+				// Use LSApplicationWorkspace on iOS 8 and above
+				Class LSApplicationWorkspace_class = objc_getClass("LSApplicationWorkspace");
+				if (LSApplicationWorkspace_class == nil) {
+					printf("Failed to get class: LSApplicationWorkspace\n");
+					return AppInstExitCodeRuntime;
+				}
+
+				LSApplicationWorkspace *workspace = [LSApplicationWorkspace_class performSelector:@selector(defaultWorkspace)];
+				if (workspace == nil) {
+					printf("Failed to get the default workspace.\n");
+					return AppInstExitCodeRuntime;
+				}
+
+				@try {
+					if ([workspace uninstallApplication:uninstallBundleID withOptions:nil]) {
+						isUninstalled = YES;
+					}
+				} @catch (NSException *exception) {
+					printf("An exception occurred while attempting to uninstall the app!\n");
+					printf("NSException info: %s\n", [[NSString stringWithFormat:@"%@", exception] UTF8String]);
+				}
+			} else {
+				// Use MobileInstallationUninstall on iOS 5〜7
+				void *image = dlopen(MI_PATH, RTLD_LAZY);
+				if (image == NULL) {
+					printf("Failed to retrieve MobileInstallation.\n");
+					return AppInstExitCodeRuntime;
+				}
+
+				MobileInstallationUninstall uninstallHandle = (MobileInstallationUninstall) dlsym(image, "MobileInstallationUninstall");
+				if (uninstallHandle == NULL) {
+					printf("Failed to retrieve the MobileInstallationUninstall function.\n");
+					return AppInstExitCodeRuntime;
+				}
+
+				if (uninstallHandle((__bridge CFStringRef) uninstallBundleID, NULL, &mobileInstallationStatusCallback, NULL) == 0) {
+					isUninstalled = YES;
+				}
+			}
+
+			if (isUninstalled) {
+				printf("Successfully uninstalled \"%s\"!\n", [uninstallBundleID UTF8String]);
+				return AppInstExitCodeSuccess;
+			}
+			printf("Failed to uninstall \"%s\".\n", [uninstallBundleID UTF8String]);
+			return AppInstExitCodeUnknown;
+		}
+
+		// Check if the user-specified file path exists
+		if (![fileManager fileExistsAtPath:filePath]) {
 			printf("The file \"%s\" could not be found. Perhaps you made a typo?\n", [filePath UTF8String]);
 			return AppInstExitCodeFileSystem;
 		}
